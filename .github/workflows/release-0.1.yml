@@ -1,0 +1,27 @@
+name: Release 0.1
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: github.event.head_commit.message == 'Publish market-news-radar 0.1'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v0.1" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "v0.1" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --target "${GITHUB_SHA}" \
+            --title "0.1" \
+            --notes "시황 도우미의 첫 공개 릴리스입니다. RSS.app 뉴스 CSV, Trump Truth RSS, VIX 공개 CSV, Telegram, Alpaca ETF 시황, 선택적 웹 검증을 하나의 시장 브리핑 흐름으로 결합합니다."
