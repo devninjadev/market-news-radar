@@ -73,6 +73,8 @@ Use optional web search only when primary or authoritative context, factual veri
 
 ## Alpaca market data
 
+Apply [Alpaca connector fallback](alpaca-connector-fallback.md): original connector first, then Paper Trading for the missing/failed read capability. Read actual fields inside `data`, retain IEX/SIP and timing limits, and never use account P/L.
+
 Use the agent's Alpaca tools, not `collect_sources.py`. Query the market clock first, record session state, then request snapshots for exactly `SPY`, `QQQ`, `DIA`, `IWM`, `RSP`, `HYG`, and `LQD`. Record the data feed and observation time. Compare the latest eligible price with the previous daily close consistently across symbols.
 
 Compute percentage moves before these signals:
