@@ -8,6 +8,8 @@ Before any Alpaca-dependent step, read [Alpaca connector fallback](references/al
 
 # Market News Radar
 
+Version: `0.1.4`
+
 Answer in Korean. Lead with the verdict, distinguish evidence states, and limit causal language to the strength of the evidence.
 
 ## Workflow
@@ -19,7 +21,7 @@ Answer in Korean. Lead with the verdict, distinguish evidence states, and limit 
 5. Keep influential observed statements even when their contents remain unverified.
 6. Synthesize: verdict → event → importance → market confirmation/contradiction → watch conditions → material limits.
 
-Read [source-contracts.md](references/source-contracts.md) before collection. Run `scripts/collect_sources.py --source all` for the three RSS.app feeds, Trump archive, and VIX observations. Open the three Telegram pages with agent web tools. Check the Alpaca market clock before requesting the seven ETF snapshots. Use web search only when additional context or verification could materially change the answer.
+Read [source-contracts.md](references/source-contracts.md) before collection. Run `scripts/collect_sources.py --source all` for FinancialJuice, Walter Bloomberg, First Squawk, the three publisher RSS.app XML feeds and Trump RSS via curl, plus VIX observations through its existing CSV transport. Run once and reuse its JSON success/failure results for this invocation; do not immediately retry failed feeds. Open the three Telegram pages with agent web tools. Check the Alpaca market clock before requesting the seven ETF snapshots. Use web search only when additional context or verification could materially change the answer.
 
 For a broad briefing, prioritize the latest six hours, retain material events from the latest 24 hours, and rank only important event clusters, normally capping the list at five to eight. Do not pad the list when fewer events are important or sources fail. For a targeted causal question, narrow collection to the relevant event and pre/post window, then compare timing, cross-sectional ETF moves, volatility observations, and independent confirmation.
 

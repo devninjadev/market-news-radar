@@ -9,12 +9,15 @@ import json
 import math
 import re
 import sys
+import subprocess
+import tempfile
+from pathlib import Path
 import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 from io import StringIO
@@ -26,6 +29,7 @@ ALLOWED_CONTENT_TYPES = frozenset({
 })
 REDIRECT_HOSTS_BY_ORIGIN = {
     "rss.app": frozenset({"rss.app"}),
+    "www.financialjuice.com": frozenset({"www.financialjuice.com", "financialjuice.com"}),
     "trumpstruth.org": frozenset({"trumpstruth.org", "www.trumpstruth.org"}),
     "www.trumpstruth.org": frozenset({"trumpstruth.org", "www.trumpstruth.org"}),
     "docs.google.com": frozenset({"docs.google.com"}),
@@ -38,9 +42,9 @@ RSSAPP_HEADER = (
 )
 VIX_SYMBOLS = ("VIX9D", "VIX", "VIX3M", "VIX6M")
 
-RSS_REUTERS_URL = "https://rss.app/feeds/_fSiPEQ8FZXQdj4js.csv"
-RSS_DOW_JONES_URL = "https://rss.app/feeds/_m6HwVpkVbkV6H1V6.csv"
-RSS_BLOOMBERG_URL = "https://rss.app/feeds/_t07deORnyZW90CjC.csv"
+RSS_REUTERS_URL = "https://rss.app/feeds/_fSiPEQ8FZXQdj4js.xml"
+RSS_DOW_JONES_URL = "https://rss.app/feeds/_m6HwVpkVbkV6H1V6.xml"
+RSS_BLOOMBERG_URL = "https://rss.app/feeds/_t07deORnyZW90CjC.xml"
 TRUMP_RSS_URL = "https://trumpstruth.org/feed"
 VIX_CSV_URL = (
     "https://docs.google.com/spreadsheets/d/15xqjZq8di2UqrePpYR_p72j5FCj-WTEDC4rdjZSqc_w/"
@@ -175,6 +179,82 @@ def fetch_url(url, *, timeout=15.0, max_bytes=MAX_BYTES):
             response.close()
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, http.client.HTTPException) as exc:
         raise FetchError(str(exc)) from exc
+
+
+def fetch_feed_curl(url, *, timeout=35.0, max_bytes=MAX_BYTES):
+    """Fetch a feed with curl; validate each redirect before the next request."""
+    allowed = _allowed_hosts_for_url(url)
+    current = url
+    with tempfile.TemporaryDirectory(prefix="market-feed-") as directory:
+        body_path = Path(directory) / "response.xml"
+        for _ in range(4):
+            _validate_https_url(current, allowed)
+            try:
+                response = subprocess.run(
+                    ["curl", "--disable", "--silent", "--show-error",
+                     "--proto", "=https", "--connect-timeout", "20",
+                     "--max-time", str(timeout), "--max-filesize", str(max_bytes),
+                     "--output", str(body_path), "--write-out", "%{json}",
+                     "--user-agent", "market-news-radar/0.1.4", current],
+                    capture_output=True, text=True, timeout=timeout + 5, check=False)
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise FetchError("curl transport unavailable or timed out") from exc
+            if response.returncode:
+                raise FetchError("curl transport failed (exit %s)" % response.returncode)
+            try:
+                metadata = json.loads(response.stdout)
+                status = int(metadata["http_code"])
+            except (ValueError, KeyError, TypeError) as exc:
+                raise FetchError("invalid curl response metadata") from exc
+            if status in {301, 302, 303, 307, 308}:
+                target = metadata.get("redirect_url")
+                if not target:
+                    raise FetchError("redirect has no target")
+                current = urllib.parse.urljoin(current, target)
+                _validate_https_url(current, allowed)
+                continue
+            if status != 200:
+                raise FetchError("HTTP %s" % status)
+            content_type = (metadata.get("content_type") or "").split(";", 1)[0].strip().lower()
+            if content_type not in ALLOWED_CONTENT_TYPES:
+                raise FetchError("unexpected response content type: " + (content_type or "missing"))
+            if not body_path.exists() or body_path.stat().st_size > max_bytes:
+                raise FetchError("missing or oversized feed response")
+            body = body_path.read_bytes()
+            return FetchResult(decode_utf8(body), current, content_type, len(body))
+    raise FetchError("too many feed redirects")
+
+
+def parse_rssapp_xml(text, source_key, fetched_at, *, offset_minutes=0, source_type="rssapp_xml"):
+    if re.search(r"<!\s*(doctype|entity)\b", text, flags=re.IGNORECASE):
+        raise SchemaError("RSS rejects DTD and ENTITY declarations")
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError as exc:
+        raise SchemaError("malformed RSS XML") from exc
+    if root.tag != "rss" or root.find("channel") is None:
+        raise SchemaError("expected RSS channel")
+    items = []
+    for node in root.findall("./channel/item"):
+        title = html_to_text(_node_text(node, "title"))
+        title_missing = not bool(title)
+        summary = html_to_text(_node_text(node, "description"))
+        title = title or summary or "Untitled feed item"
+        url = _validate_item_url(_node_text(node, "link"), "RSS item URL")
+        raw_date = _node_text(node, "pubDate")
+        dates = _publication_fields(raw_date, fetched_at)
+        if raw_date and offset_minutes:
+            corrected = _parse_timestamp(raw_date, "published_at") + timedelta(minutes=offset_minutes)
+            dates = _publication_fields(corrected.isoformat(), fetched_at)
+            dates["published_at_raw"] = raw_date
+            dates["timestamp_correction_minutes"] = offset_minutes
+        items.append(_base_item(
+            id=_node_text(node, "guid") or url,
+            source_name=source_key, source_type=source_type, title=title,
+            summary=summary, title_missing=title_missing, url=url,
+            observed_at=fetched_at, verification_status="source_claim", source_cluster=None,
+            **dates))
+    return items
 
 
 def _base_item(**values):
@@ -384,20 +464,26 @@ def parse_vix_csv(text, fetched_at):
 
 
 SOURCES = {
-    "rss-reuters": (RSS_REUTERS_URL, lambda text, fetched_at: parse_rssapp_csv(text, "reuters", fetched_at)),
-    "rss-dow-jones": (RSS_DOW_JONES_URL, lambda text, fetched_at: parse_rssapp_csv(text, "dow_jones", fetched_at)),
-    "rss-bloomberg": (RSS_BLOOMBERG_URL, lambda text, fetched_at: parse_rssapp_csv(text, "bloomberg", fetched_at)),
+    "financialjuice": ("https://www.financialjuice.com/feed.ashx?xy=rss",
+                       lambda text, stamp: parse_rssapp_xml(text, "financialjuice", stamp, source_type="rss")),
+    "walter-bloomberg": ("https://rss.app/feeds/YcRRdWN5eSO3o2LP.xml",
+                         lambda text, stamp: parse_rssapp_xml(text, "walter_bloomberg", stamp)),
+    "first-squawk": ("https://rss.app/feeds/d68ow40E3dkwaEvN.xml",
+                     lambda text, stamp: parse_rssapp_xml(text, "first_squawk", stamp, offset_minutes=-540)),
+    "rss-reuters": (RSS_REUTERS_URL, lambda text, fetched_at: parse_rssapp_xml(text, "reuters", fetched_at)),
+    "rss-dow-jones": (RSS_DOW_JONES_URL, lambda text, fetched_at: parse_rssapp_xml(text, "dow_jones", fetched_at)),
+    "rss-bloomberg": (RSS_BLOOMBERG_URL, lambda text, fetched_at: parse_rssapp_xml(text, "bloomberg", fetched_at)),
     "trump": (TRUMP_RSS_URL, parse_trump_rss),
     "vix": (VIX_CSV_URL, parse_vix_csv),
 }
 
 
-def collect_requested(source_keys, fetched_at, *, fetcher=fetch_url):
+def collect_requested(source_keys, fetched_at, *, fetcher=None):
     envelope = {"fetched_at": fetched_at, "sources": {}, "errors": {}}
     for source_key in source_keys:
         url, parser = SOURCES[source_key]
         try:
-            fetched = fetcher(url)
+            fetched = (fetcher or (fetch_url if source_key == "vix" else fetch_feed_curl))(url)
             items = parser(fetched.text, fetched_at)
             for item in items:
                 item["retrieved_from"] = fetched.final_url

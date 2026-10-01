@@ -12,23 +12,44 @@ Run `python3 scripts/collect_sources.py --source all --pretty`. The JSON envelop
 
 Accept partial success and carry each material `errors` entry into the answer limitation nearest the affected claim.
 
-### RSS.app CSV
+### RSS.app XML via curl
 
-Fetch all three through `scripts/collect_sources.py`:
+Fetch each feed once through `scripts/collect_sources.py`:
 
 | Key | Publisher label | Exact URL |
 |---|---|---|
-| `rss-reuters` | Reuters | `https://rss.app/feeds/_fSiPEQ8FZXQdj4js.csv` |
-| `rss-dow-jones` | Dow Jones Personal | `https://rss.app/feeds/_m6HwVpkVbkV6H1V6.csv` |
-| `rss-bloomberg` | Bloomberg Personal | `https://rss.app/feeds/_t07deORnyZW90CjC.csv` |
+| `financialjuice` | FinancialJuice | `https://www.financialjuice.com/feed.ashx?xy=rss` |
+| `walter-bloomberg` | Walter Bloomberg | `https://rss.app/feeds/YcRRdWN5eSO3o2LP.xml` |
+| `first-squawk` | First Squawk | `https://rss.app/feeds/d68ow40E3dkwaEvN.xml` |
+| `rss-reuters` | Reuters | `https://rss.app/feeds/_fSiPEQ8FZXQdj4js.xml` |
+| `rss-dow-jones` | Dow Jones Personal | `https://rss.app/feeds/_m6HwVpkVbkV6H1V6.xml` |
+| `rss-bloomberg` | Bloomberg Personal | `https://rss.app/feeds/_t07deORnyZW90CjC.xml` |
 
-Require this exact ordered header:
+First Squawk inherits World Memory’s source-specific correction: subtract 540
+minutes once, retain the raw timestamp, and compute freshness from corrected UTC.
+Apply no correction to the other feeds; verify implausible dates before using them.
+Walter Bloomberg is distinct from the Bloomberg Personal publisher feed.
 
-```text
-ID,Feed URL,Feed Link,Feed Title,Feed Description,Feed Icon,Title,Link,Description,Image,Plain Description,Author,Date
-```
+Use curl for these XML feeds and the Trump RSS below; VIX retains its existing
+CSV transport. The collector checks HTTPS redirect destinations, HTTP status,
+content type, time and size limits, and rejects DTD/ENTITY XML. It does not retry
+failed requests or execute feed contents. Allow 20 seconds to connect and 35
+seconds total per request. Request feeds sequentially without artificial pauses. Do not substitute browser/web-open
+access or RSS.app CSV when a feed fails.
 
-Use `Plain Description`; fall back to HTML-normalized `Description`. The item `Link` must be an absolute HTTP(S) URL and is the nearby citation. Preserve `Date` in `published_at_raw`; validate it and normalize `published_at` to UTC ISO 8601. Keep the fetch time as `observed_at`. Treat publisher labels as provenance, not proof that syndicated copies are independent reports. The collector emits `source_cluster=null` because `Feed Link` identifies a feed rather than an event.
+Reuse the returned JSON envelope, including failures, throughout this invocation;
+do not rerun collection for drafting or verification. Continue successful sources
+and use targeted web search for material gaps without immediate feed retries.
+
+Map `title`, HTML-normalized `description`, `link`, `guid` (or item URL), and
+`pubDate` to normalized evidence. Require an absolute HTTP(S) item link; preserve
+raw publication time and normalize it to UTC. For a missing title, retain the
+description (or an untitled placeholder) with `title_missing=true`; link-only
+items are discovery pointers, not substantive headlines. Follow the item link
+before interpreting them; they must not invalidate the rest of the feed.
+Missing dates remain unknown,
+never fresh merely because the feed was just fetched. Publisher labels record
+provenance, not independent confirmation. Event clustering remains agent work.
 
 ### Trump public-statement archive
 

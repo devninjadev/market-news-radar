@@ -320,6 +320,7 @@ class HttpBoundaryTests(unittest.TestCase):
 
 
 class AggregationTests(unittest.TestCase):
+
     def test_one_source_failure_is_returned_without_aborting_successes(self):
         def fake_fetch(url, **_kwargs):
             if "rss.app" in url:
@@ -353,7 +354,7 @@ class AggregationTests(unittest.TestCase):
         self.assertIn("rss-reuters", envelope["errors"])
 
     def test_transport_read_error_is_isolated_to_its_source(self):
-        with mock.patch("collect_sources.urllib.request.build_opener", return_value=_SourceOpener()):
+        with mock.patch("collect_sources.urllib.request.build_opener", return_value=_SourceOpener()), mock.patch("collect_sources.fetch_feed_curl", side_effect=FetchError("connection reset")):
             envelope = collect_requested(("rss-reuters", "vix"), NOW)
         self.assertEqual(list(envelope["sources"]), ["vix"])
         self.assertIn("connection reset", envelope["errors"]["rss-reuters"]["error"])
@@ -363,6 +364,75 @@ class AggregationTests(unittest.TestCase):
         with mock.patch("collect_sources.collect_requested", return_value=envelope):
             with self.assertRaises(ValueError):
                 main(["--source", "vix"])
+
+
+
+
+class CurlFeedTests(unittest.TestCase):
+
+    def test_xml_time_summary_and_missing_date(self):
+        from collect_sources import parse_rssapp_xml
+        item = parse_rssapp_xml(TRUMP_XML, "reuters", NOW)[0]
+        self.assertEqual(item["source_type"], "rssapp_xml")
+        self.assertIsNotNone(item["published_at"])
+        self.assertIsNone(item["source_cluster"])
+        undated = TRUMP_XML.replace("<pubDate>Fri, 15 Aug 2026 04:00:00 +0000</pubDate>", "")
+        self.assertEqual(parse_rssapp_xml(undated, "reuters", NOW)[0]["freshness"], "unknown")
+        for bad in ("<html>blocked</html>", "<!DOCTYPE rss>" + TRUMP_XML):
+            with self.assertRaises(SchemaError):
+                parse_rssapp_xml(bad, "reuters", NOW)
+
+    def test_titleless_social_item_preserves_feed(self):
+        from collect_sources import parse_rssapp_xml
+        xml = TRUMP_XML.replace("<title>A tariff statement</title>", "")
+        items = parse_rssapp_xml(xml, "walter_bloomberg", NOW)
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0]["title_missing"])
+        self.assertTrue(items[0]["url"])
+
+    def test_first_squawk_timestamp_correction(self):
+        from collect_sources import SOURCES
+        normal = SOURCES["walter-bloomberg"][1](TRUMP_XML, NOW)[0]
+        corrected = SOURCES["first-squawk"][1](TRUMP_XML, NOW)[0]
+        from datetime import datetime
+        gap = datetime.fromisoformat(normal["published_at"].replace("Z", "+00:00")) - datetime.fromisoformat(corrected["published_at"].replace("Z", "+00:00"))
+        self.assertEqual(gap.total_seconds(), 9 * 3600)
+        self.assertEqual(corrected["published_at_raw"], normal["published_at_raw"])
+
+    def test_curl_download_and_unapproved_redirect(self):
+        import json
+        from pathlib import Path
+        from collect_sources import fetch_feed_curl
+        def run(args, **kwargs):
+            Path(args[args.index("--output") + 1]).write_text(TRUMP_XML)
+            self.assertEqual(args[args.index("--connect-timeout") + 1], "20")
+            self.assertEqual(args[args.index("--max-time") + 1], "35.0")
+            self.assertNotIn("--location", args)
+            self.assertNotIn("--retry", args)
+            return mock.Mock(returncode=0, stdout=json.dumps({"http_code":200,"content_type":"application/rss+xml"}))
+        with mock.patch("collect_sources.subprocess.run", side_effect=run) as request:
+            self.assertEqual(fetch_feed_curl("https://rss.app/feeds/test.xml").text, TRUMP_XML)
+            self.assertEqual(request.call_count, 1)
+        redirect=mock.Mock(returncode=0, stdout=json.dumps({"http_code":302,"redirect_url":"https://evil.example/feed"}))
+        with mock.patch("collect_sources.subprocess.run", return_value=redirect) as request:
+            with self.assertRaises(FetchError):
+                fetch_feed_curl("https://rss.app/feeds/test.xml")
+            self.assertEqual(request.call_count, 1)
+
+    def test_curl_failure_preserves_other_sources(self):
+        import json
+        from collect_sources import fetch_feed_curl
+        response=mock.Mock(returncode=0, stdout=json.dumps({"http_code":429}))
+        with mock.patch("collect_sources.subprocess.run", return_value=response) as request:
+            with self.assertRaisesRegex(FetchError, "429"):
+                fetch_feed_curl("https://rss.app/feeds/test.xml")
+            self.assertEqual(request.call_count, 1)
+        good=FetchResult(TRUMP_XML, "https://rss.app/feeds/test.xml", "application/rss+xml", len(TRUMP_XML))
+        with mock.patch("collect_sources.fetch_feed_curl", side_effect=[FetchError("HTTP 429"),good]):
+            result=collect_requested(("rss-reuters","rss-bloomberg"), NOW)
+        self.assertIn("rss-reuters", result["errors"])
+        self.assertEqual(len(result["sources"]["rss-bloomberg"]), 1)
+
 
 
 if __name__ == "__main__":
